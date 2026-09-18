@@ -85,29 +85,23 @@ jobs:
           CRAVE_USERNAME: ${{ secrets.CRAVE_USERNAME }}
           CRAVE_TOKEN: ${{ secrets.CRAVE_TOKEN }}
 
-      - name: Create / ensure Crave clone
+      - name: Debug crave CLI
         run: |
-          set -e
-          # If running inside devspace, skip clone creation
-          if [[ "$DCDEVSPACE" == *1* ]]; then
-            echo "Already inside crave devspace — skipping clone create"
-          else
-            # Ensure jq present for clone list check
-            sudo apt-get update && sudo apt-get install -y jq || true
-            if crave clone list --json 2>&1 | jq -e --arg f "$PROJECTFOLDER" '.clones[] | select(.["Cloned At"] == $f)' >/dev/null 2>&1; then
-              echo "Clone $PROJECTFOLDER already exists"
-            else
-              echo "Creating clone $PROJECTFOLDER projectID $PROJECTID"
-              crave clone create --projectID "$PROJECTID" "$PROJECTFOLDER" || { echo "::warning::clone create failed — may already exist or need manual creation"; crave clone list || true; }
-            fi
-            echo "=== crave clone list ==="
-            crave clone list || true
-            crave clone list --json | jq . || true
-          fi
+          crave --help || true
+          echo "=== crave list --help ==="
+          crave list --help 2>&1 || true
+          echo "=== crave devspace --help ==="
+          crave devspace --help 2>&1 || true
+          echo "=== crave run --help ==="
+          crave run --help 2>&1 | head -n 100 || true
+          echo "=== crave.conf ==="
+          cat ~/.crave.conf | sed 's/"Authorization": ".*"/"Authorization": "***"/' || cat ~/crave.conf | sed 's/"Authorization": ".*"/"Authorization": "***"/' || true
+          echo "=== crave list ==="
+          crave list 2>&1 | head -n 100 || true
+          crave list --json 2>&1 | head -n 200 || true
 
-      - name: Configure crave.yaml (after clone exists)
+      - name: Configure crave.yaml
         run: |
-          # Prefer custom yaml from secret, else template
           if [[ -n "${{ secrets.CUSTOM_YAML }}" ]]; then
             echo "${{ secrets.CUSTOM_YAML }}" > /tmp/crave.yaml
             echo "Using CUSTOM_YAML secret"
@@ -117,52 +111,45 @@ jobs:
             echo "Using configs/crave/crave.yaml.aosp"
             cat /tmp/crave.yaml
           fi
-          # Place where crave expects it (project's .repo/manifests)
-          sudo mkdir -p $PROJECTFOLDER/.repo/manifests 2>/dev/null || mkdir -p $PROJECTFOLDER/.repo/manifests || true
-          sudo cp /tmp/crave.yaml $PROJECTFOLDER/.repo/manifests/crave.yaml 2>/dev/null || cp /tmp/crave.yaml $PROJECTFOLDER/.repo/manifests/crave.yaml || true
-          ls -l $PROJECTFOLDER/.repo/manifests/ || true
-          cat $PROJECTFOLDER/.repo/manifests/crave.yaml || true
+          # Prepare local crave.yaml for devspace (optional)
+          echo "Prepared /tmp/crave.yaml"
 
-      - name: Build via crave run (gtel3g)
+      - name: Build via crave devspace (gtel3g)
         run: |
           set -e
-          # Extra init for non-Lineage ROMs if needed (not for gtel3g)
-          LOCAL_MANIFEST="mkdir -p .repo/local_manifests && rm -rf .repo/local_manifests/* || true && curl -L https://raw.githubusercontent.com/BytinIsDead/gtel3g-builder/main/manifests/gtel3g.xml -o .repo/local_manifests/gtel3g.xml && cat .repo/local_manifests/gtel3g.xml"
+          LOCAL_MANIFEST_URL="https://raw.githubusercontent.com/BytinIsDead/gtel3g-builder/main/manifests/gtel3g.xml"
           LUNCH="lunch lineage_gtel3g-${{ inputs.variant || 'userdebug' }}"
           BUILD_CMD="mka bacon -j\$(nproc --all)"
 
-          # Paid / clean flags
-          CLEAN=""
-          if [[ "${{ inputs.clean }}" == "yes" ]]; then CLEAN="--clean"; fi
-          PAID=""
-          if [[ "${{ inputs.paid }}" == "true" || -n "${{ secrets.PAID }}" ]]; then
-            echo "Paid queue enabled (aosp-silver)"
-            PAID="--platform aosp-silver"
-          fi
-
-          echo "=== Queuing crave run ==="
-          echo "PROJECTID=$PROJECTID $PROJECTFOLDER"
-          echo "REPO_INIT=$REPO_INIT"
-          echo "LOCAL_MANIFEST=$LOCAL_MANIFEST"
+          echo "=== Building via crave devspace ==="
+          echo "PROJECTFOLDER=$PROJECTFOLDER"
           echo "LUNCH=$LUNCH"
-          echo "BUILD_CMD=$BUILD_CMD"
-          echo "PWD before: $(pwd)"
-          echo "crave clone list:"
-          crave clone list || true
 
-          # IMPORTANT: must run from inside the project folder so crave finds the project
-          cd "$PROJECTFOLDER"
-          echo "PWD now: $(pwd)"
-          ls -la || true
-
-          crave ${{ secrets.CRAVE_FLAGS }} run --no-patch $CLEAN $PAID -- "
+          # Use crave devspace to run build directly inside allocated devspace
+          # This works with crave 0.2+ without needing 'crave run' queue
+          crave devspace -- "
             set -e
-            echo \"=== inside crave devspace PWD=\$(pwd) ===\"
-            # Ensure local manifests override
-            rm -rf .repo/local_manifests/*.xml || true
-            $LOCAL_MANIFEST
+            echo \"=== inside devspace ===\"
+            pwd; ls -la
+            # Ensure project folder exists and init if needed
+            mkdir -p $PROJECTFOLDER
+            cd $PROJECTFOLDER
+            echo \"PWD=\$(pwd)\"
 
-            # Resync (crave ships /opt/crave/resync.sh or /usr/bin/resync)
+            if [ ! -d .repo ]; then
+              echo \"=== repo init Lineage16 ===\"
+              $REPO_INIT
+            else
+              echo \"=== .repo exists, skipping init ===\"
+            fi
+
+            echo \"=== local manifest ===\"
+            mkdir -p .repo/local_manifests
+            rm -rf .repo/local_manifests/*.xml || true
+            curl -L $LOCAL_MANIFEST_URL -o .repo/local_manifests/gtel3g.xml
+            cat .repo/local_manifests/gtel3g.xml
+
+            echo \"=== repo sync ===\"
             if [ -f /opt/crave/resync.sh ]; then
               /opt/crave/resync.sh
             elif [ -f /usr/bin/resync ]; then
@@ -175,40 +162,40 @@ jobs:
             export BUILD_HOSTNAME=crave
             source build/envsetup.sh
             $LUNCH
-            make installclean || true
+            # Optional clean
+            if [[ \"${{ inputs.clean }}\" == \"yes\" ]]; then
+              make installclean
+            fi
             $BUILD_CMD
           "
-          echo "=== crave run finished ==="
+          echo "=== crave devspace build finished ==="
 
       - name: Pull artifacts from crave
         if: always()
         run: |
           set +e
-          cd "$PROJECTFOLDER" || cd /crave-devspaces/Lineage16 || true
-          echo "Pulling out/error.log if any from $PROJECTFOLDER"
-          crave pull out/error.log 2>&1 | head -n 200 || true
-          if [ -f out/error.log ]; then echo "=== out/error.log ==="; cat out/error.log | head -n 500; fi
-          if [ -f "$PROJECTFOLDER/out/error.log" ]; then echo "=== $PROJECTFOLDER/out/error.log ==="; cat "$PROJECTFOLDER/out/error.log" | head -n 500; fi
+          echo "=== pulling via crave devspace ==="
+          # List via devspace
+          crave devspace -- "ls -lh $PROJECTFOLDER/out/target/product/gtel3g/ 2>&1 | head -n 50; du -sh $PROJECTFOLDER/out/target/product/gtel3g/* 2>/dev/null | head -n 20 || true" || crave exec -- "ls -lh $PROJECTFOLDER/out/target/product/gtel3g/" 2>&1 | head -n 50 || true
 
-          echo "=== listing via crave ssh ==="
-          crave ssh -- "ls -lh out/target/product/gtel3g/ || true; du -sh out/target/product/gtel3g/* 2>/dev/null | head -n 20 || true" || true
-
-          # Try crave push + upload.sh path (exists on newer crave images)
-          echo "${{ secrets.GITHUB_TOKEN }}" > /tmp/token.txt
-          crave push /tmp/token.txt -d $(crave ssh -- pwd 2>/dev/null | grep -v Select | tr -d '\r' | head -n1)/ 2>&1 || echo "crave push not available, skipping"
-
-          # Fallback: direct pull of zip via crave pull
           mkdir -p $GITHUB_WORKSPACE/pulled
-          cd $GITHUB_WORKSPACE
-          for f in out/target/product/gtel3g/*.zip out/target/product/gtel3g/*.zip.md5sum out/target/product/gtel3g/recovery.img; do
-            crave pull "$PROJECTFOLDER/$f" 2>&1 | head -n 20 || crave pull "$f" 2>&1 | head -n 20 || true
-            if [ -f "$(basename $f)" ]; then mv "$(basename $f)" pulled/ 2>/dev/null || true; fi
+          # Try crave pull (works for devspace files)
+          for f in $PROJECTFOLDER/out/target/product/gtel3g/*.zip $PROJECTFOLDER/out/target/product/gtel3g/*.zip.md5sum $PROJECTFOLDER/out/target/product/gtel3g/recovery.img $PROJECTFOLDER/out/error.log; do
+            echo "Trying pull $f"
+            crave pull "$f" 2>&1 | head -n 20 || true
+            # crave pull may place file in cwd with basename
+            if [ -f "$(basename $f)" ]; then mv -v "$(basename $f)" $GITHUB_WORKSPACE/pulled/ 2>/dev/null || true; fi
           done
-          # also try pulling from absolute path
-          ls -lh pulled/ || true
-          ls -lh $PROJECTFOLDER/out/target/product/gtel3g/ 2>/dev/null || true
-          # Try official upload script if present on devspace
-          crave ssh -- "if [ -f /opt/crave/github-actions/upload.sh ]; then export GH_UPLOAD_LIMIT=\"${{ secrets.GH_UPLOAD_LIMIT }}\"; bash /opt/crave/github-actions/upload.sh '${{ github.run_id }}' 'gtel3g' '${{ github.repository }}' 'lineage_gtel3g-${{ github.run_id }}' '' || true; fi" || true
+          # Also try devspace cp via tar
+          crave devspace -- "tar -czf /tmp/gtel3g-pulled.tar.gz -C $PROJECTFOLDER out/target/product/gtel3g/*.zip out/target/product/gtel3g/*.zip.md5sum out/error.log 2>&1 | head -n 20; ls -lh /tmp/gtel3g-pulled.tar.gz || true" || true
+          crave pull /tmp/gtel3g-pulled.tar.gz 2>&1 | head -n 20 || true
+          if [ -f gtel3g-pulled.tar.gz ]; then mv gtel3g-pulled.tar.gz $GITHUB_WORKSPACE/pulled/ || true; tar -xzf $GITHUB_WORKSPACE/pulled/gtel3g-pulled.tar.gz -C $GITHUB_WORKSPACE/pulled/ 2>&1 | head -n 20 || true; fi
+          if [ -f /tmp/gtel3g-pulled.tar.gz ]; then cp /tmp/gtel3g-pulled.tar.gz $GITHUB_WORKSPACE/pulled/ 2>/dev/null || true; fi
+
+          echo "=== pulled ==="
+          ls -lh $GITHUB_WORKSPACE/pulled/ || true
+          cat $GITHUB_WORKSPACE/pulled/out/error.log 2>&1 | head -n 200 || true
+          cat $PROJECTFOLDER/out/error.log 2>&1 | head -n 200 || true
 
       - name: Upload artifacts to GitHub (fallback)
         if: always()
