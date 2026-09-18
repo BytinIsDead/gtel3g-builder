@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  gtel3g builder manifest — LineageOS 16.0
+  Uses BytinIsDead device + kernel, upstream gtel3g common/vendor
+  Fixes upstream typo: reivision -> revision
+-->
+<manifest>
+  <remote name="github" fetch="https://github.com/" />
+  <remote name="bytin" fetch="https://github.com/BytinIsDead/" />
+  <remote name="gtel3g" fetch="https://github.com/gtel3g/" />
+
+  <!-- BytinIsDead's trees (fixed) -->
+  <project path="device/samsung/gtel3g" name="android_device_samsung_gtel3g" remote="bytin" revision="lineage-16.0" />
+  <project path="kernel/samsung/gtel3g" name="android_kernel_samsung_gtel3g" remote="bytin" revision="main" />
+
+  <!-- Common / hardware from upstream gtel3g org (lineage-16.0) -->
+  <project path="device/samsung/scx35-common" name="android_device_samsung_scx35-common" remote="gtel3g" revision="lineage-16.0" />
+  <project path="hardware/sprd" name="android_hardware_sprd" remote="gtel3g" revision="lineage-16.0" />
+  <project path="vendor/samsung/gtel3g" name="android_vendor_samsung_gtel3g" remote="gtel3g" revision="lineage-16.0" />
+  <project path="vendor/samsung/scx35-common" name="android_vendor_samsung_scx35-common" remote="gtel3g" revision="lineage-16.0" />
+
+  <!-- Lineage dependencies -->
+  <project path="external/stlport" name="LineageOS/android_external_stlport" remote="github" revision="lineage-15.1" />
+  <project path="packages/resources/devicesettings" name="LineageOS/android_packages_resources_devicesettings" remote="github" revision="lineage-16.0" />
+</manifest>
