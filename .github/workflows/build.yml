@@ -89,14 +89,20 @@ jobs:
 
       - name: Repo init + sync
         run: |
+          set -euo pipefail
           mkdir -p lineage-16.0/.repo/local_manifests
           cd lineage-16.0
           repo init -u https://github.com/LineageOS/android.git -b lineage-16.0 --git-lfs --depth=1 || repo init -u https://github.com/LineageOS/android.git -b lineage-16.0 --git-lfs
           cp -v $GITHUB_WORKSPACE/builder/manifests/gtel3g.xml .repo/local_manifests/gtel3g.xml
           cat .repo/local_manifests/gtel3g.xml
+          echo "=== repo sync (this takes ~30-60 min) ==="
           repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --optimized-fetch 2>&1 | tee repo-sync.log
+          # fail if repo sync failed (pipefail ensures tee doesn't mask)
           echo "=== repo manifest ==="
           cat .repo/manifest.xml | head -n 100 || true
+          echo "=== local_manifests ==="
+          ls -R .repo/local_manifests/ || true
+          test -f build/envsetup.sh || { echo "ERROR: build/envsetup.sh missing — repo sync incomplete"; cat repo-sync.log; exit 1; }
 
       - name: Setup ccache
         working-directory: lineage-16.0
