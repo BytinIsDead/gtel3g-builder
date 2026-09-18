@@ -1,6 +1,10 @@
-# crave.io credentials — fill via GitHub Secrets
-# Download your real crave.conf from https://foss.crave.io/API -> API Keys
-# Then create secrets CRAVE_USERNAME and CRAVE_TOKEN from it
-[Crave]
-username = ${CRAVE_USERNAME}
-token = ${CRAVE_TOKEN}
+{
+  "username": "${CRAVE_USERNAME}",
+  "headers": {
+    "Content-Type": "application/json",
+    "Authorization": "${CRAVE_TOKEN}",
+    "User-Agent": "Crave"
+  },
+  "projects": [],
+  "server": "https://foss.crave.io/api"
+}
