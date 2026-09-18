@@ -27,6 +27,9 @@ on:
       - ".github/workflows/crave.yml"
       - "configs/crave/**"
 
+permissions:
+  contents: write
+
 concurrency:
   group: crave-gtel3g-${{ github.ref }}
   cancel-in-progress: false
@@ -52,7 +55,12 @@ jobs:
             echo "::error::Set CRAVE_USERNAME and CRAVE_TOKEN in repo Secrets (from foss.crave.io -> API Keys -> crave.conf)"
             exit 1
           fi
-          echo "Crave creds present"
+          if [[ "${{ secrets.CRAVE_USERNAME }}" == FILL_ME_IN* || "${{ secrets.CRAVE_TOKEN }}" == FILL_ME_IN* ]]; then
+            echo "::error::CRAVE secrets still contain placeholder FILL_ME_IN — update them in Settings -> Secrets -> Actions"
+            echo "See README Crave section or run: gh secret set CRAVE_USERNAME --repo ${{ github.repository }} --body \"your@email\" && gh secret set CRAVE_TOKEN --repo ${{ github.repository }} --body \"your_token\""
+            exit 1
+          fi
+          echo "Crave creds present (username: ${{ secrets.CRAVE_USERNAME }})"
 
       - name: Install crave
         run: |
@@ -62,21 +70,43 @@ jobs:
           chmod +x ~/.bin/crave
           sudo ln -sf $HOME/.bin/crave /usr/bin/crave
           crave --version || true
-          # create crave.conf from sample
+          # create crave.conf from sample (crave expects ~/crave.conf or ~/.crave.conf)
           if [ -f crave.conf.sample ]; then
-            envsubst < crave.conf.sample > ~/.crave.conf 2>/dev/null || envsubst < crave.conf.sample > crave.conf
-            # ensure crave finds it
-            mkdir -p ~/.config 2>/dev/null || true
-            cp -v crave.conf ~/.crave.conf 2>/dev/null || cp -v ~/.crave.conf crave.conf 2>/dev/null || true
-            cat ~/.crave.conf | sed 's/token = .*/token = ***/' || true
+            envsubst < crave.conf.sample > /tmp/crave.conf
+            mkdir -p $HOME
+            cp -v /tmp/crave.conf $HOME/crave.conf
+            cp -v /tmp/crave.conf $HOME/.crave.conf
+            cat $HOME/.crave.conf | sed 's/token = .*/token = ***/' || true
+            crave --version 2>&1 | head || true
+          else
+            echo "::warning::crave.conf.sample not found"
           fi
         env:
           CRAVE_USERNAME: ${{ secrets.CRAVE_USERNAME }}
           CRAVE_TOKEN: ${{ secrets.CRAVE_TOKEN }}
 
-      - name: Configure crave.yaml
+      - name: Create / ensure Crave clone
         run: |
-          mkdir -p .repo/manifests 2>/dev/null || true
+          set -e
+          # If running inside devspace, skip clone creation
+          if [[ "$DCDEVSPACE" == *1* ]]; then
+            echo "Already inside crave devspace — skipping clone create"
+          else
+            # Ensure jq present for clone list check
+            sudo apt-get update && sudo apt-get install -y jq || true
+            if crave clone list --json 2>&1 | jq -e --arg f "$PROJECTFOLDER" '.clones[] | select(.["Cloned At"] == $f)' >/dev/null 2>&1; then
+              echo "Clone $PROJECTFOLDER already exists"
+            else
+              echo "Creating clone $PROJECTFOLDER projectID $PROJECTID"
+              crave clone create --projectID "$PROJECTID" "$PROJECTFOLDER" || { echo "::warning::clone create failed — may already exist or need manual creation"; crave clone list || true; }
+            fi
+            echo "=== crave clone list ==="
+            crave clone list || true
+            crave clone list --json | jq . || true
+          fi
+
+      - name: Configure crave.yaml (after clone exists)
+        run: |
           # Prefer custom yaml from secret, else template
           if [[ -n "${{ secrets.CUSTOM_YAML }}" ]]; then
             echo "${{ secrets.CUSTOM_YAML }}" > /tmp/crave.yaml
@@ -88,31 +118,15 @@ jobs:
             cat /tmp/crave.yaml
           fi
           # Place where crave expects it (project's .repo/manifests)
-          # crave will copy it during clone create; also keep a copy for direct devspace usage
-          mkdir -p $PROJECTFOLDER/.repo/manifests 2>/dev/null || true
-          cp /tmp/crave.yaml $PROJECTFOLDER/.repo/manifests/crave.yaml 2>/dev/null || true
-
-      - name: Create / ensure Crave clone
-        run: |
-          set -e
-          # If running inside devspace, skip clone creation
-          if [[ "$DCDEVSPACE" == *1* ]]; then
-            echo "Already inside crave devspace — skipping clone create"
-          else
-            if crave clone list --json | jq -e --arg f "$PROJECTFOLDER" '.clones[] | select(.["Cloned At"] == $f)' >/dev/null 2>&1; then
-              echo "Clone $PROJECTFOLDER already exists"
-            else
-              echo "Creating clone $PROJECTFOLDER projectID $PROJECTID"
-              crave clone create --projectID "$PROJECTID" "$PROJECTFOLDER" || { echo "::warning::clone create failed — may already exist or need manual creation"; crave clone list || true; }
-            fi
-            crave clone list || true
-          fi
+          sudo mkdir -p $PROJECTFOLDER/.repo/manifests 2>/dev/null || mkdir -p $PROJECTFOLDER/.repo/manifests || true
+          sudo cp /tmp/crave.yaml $PROJECTFOLDER/.repo/manifests/crave.yaml 2>/dev/null || cp /tmp/crave.yaml $PROJECTFOLDER/.repo/manifests/crave.yaml || true
+          ls -l $PROJECTFOLDER/.repo/manifests/ || true
+          cat $PROJECTFOLDER/.repo/manifests/crave.yaml || true
 
       - name: Build via crave run (gtel3g)
         run: |
           set -e
           # Extra init for non-Lineage ROMs if needed (not for gtel3g)
-          BUILD_DIFFERENT_ROM="echo 'Using base Lineage16 project'"
           LOCAL_MANIFEST="mkdir -p .repo/local_manifests && rm -rf .repo/local_manifests/* || true && curl -L https://raw.githubusercontent.com/BytinIsDead/gtel3g-builder/main/manifests/gtel3g.xml -o .repo/local_manifests/gtel3g.xml && cat .repo/local_manifests/gtel3g.xml"
           LUNCH="lunch lineage_gtel3g-${{ inputs.variant || 'userdebug' }}"
           BUILD_CMD="mka bacon -j\$(nproc --all)"
@@ -132,9 +146,18 @@ jobs:
           echo "LOCAL_MANIFEST=$LOCAL_MANIFEST"
           echo "LUNCH=$LUNCH"
           echo "BUILD_CMD=$BUILD_CMD"
+          echo "PWD before: $(pwd)"
+          echo "crave clone list:"
+          crave clone list || true
+
+          # IMPORTANT: must run from inside the project folder so crave finds the project
+          cd "$PROJECTFOLDER"
+          echo "PWD now: $(pwd)"
+          ls -la || true
 
           crave ${{ secrets.CRAVE_FLAGS }} run --no-patch $CLEAN $PAID -- "
             set -e
+            echo \"=== inside crave devspace PWD=\$(pwd) ===\"
             # Ensure local manifests override
             rm -rf .repo/local_manifests/*.xml || true
             $LOCAL_MANIFEST
@@ -161,30 +184,29 @@ jobs:
         if: always()
         run: |
           set +e
-          echo "Pulling out/error.log if any"
+          cd "$PROJECTFOLDER" || cd /crave-devspaces/Lineage16 || true
+          echo "Pulling out/error.log if any from $PROJECTFOLDER"
           crave pull out/error.log 2>&1 | head -n 200 || true
           if [ -f out/error.log ]; then echo "=== out/error.log ==="; cat out/error.log | head -n 500; fi
+          if [ -f "$PROJECTFOLDER/out/error.log" ]; then echo "=== $PROJECTFOLDER/out/error.log ==="; cat "$PROJECTFOLDER/out/error.log" | head -n 500; fi
 
-          # Upload via crave ssh (crave's upload helper)
-          # First push GitHub token for upload script
-          echo "${{ secrets.GITHUB_TOKEN }}" > /tmp/token.txt
-          # Use crave ssh to run upload.sh if present
+          echo "=== listing via crave ssh ==="
           crave ssh -- "ls -lh out/target/product/gtel3g/ || true; du -sh out/target/product/gtel3g/* 2>/dev/null | head -n 20 || true" || true
 
           # Try crave push + upload.sh path (exists on newer crave images)
+          echo "${{ secrets.GITHUB_TOKEN }}" > /tmp/token.txt
           crave push /tmp/token.txt -d $(crave ssh -- pwd 2>/dev/null | grep -v Select | tr -d '\r' | head -n1)/ 2>&1 || echo "crave push not available, skipping"
 
-          # Fallback: direct pull of zip via crave pull (slower but works for small zips)
-          # We pull via crave ssh + scp-like? Use crave pull for each artifact
-          mkdir -p pulled
+          # Fallback: direct pull of zip via crave pull
+          mkdir -p $GITHUB_WORKSPACE/pulled
+          cd $GITHUB_WORKSPACE
           for f in out/target/product/gtel3g/*.zip out/target/product/gtel3g/*.zip.md5sum out/target/product/gtel3g/recovery.img; do
-            crave pull "$f" 2>&1 | head -n 20 || true
-            # crave pull places file at ./<filename> ? Check
+            crave pull "$PROJECTFOLDER/$f" 2>&1 | head -n 20 || crave pull "$f" 2>&1 | head -n 20 || true
             if [ -f "$(basename $f)" ]; then mv "$(basename $f)" pulled/ 2>/dev/null || true; fi
-            if [ -f "$f" ]; then cp "$f" pulled/ 2>/dev/null || true; fi
           done
+          # also try pulling from absolute path
           ls -lh pulled/ || true
-          ls -lh out/target/product/gtel3g/ 2>/dev/null || true
+          ls -lh $PROJECTFOLDER/out/target/product/gtel3g/ 2>/dev/null || true
           # Try official upload script if present on devspace
           crave ssh -- "if [ -f /opt/crave/github-actions/upload.sh ]; then export GH_UPLOAD_LIMIT=\"${{ secrets.GH_UPLOAD_LIMIT }}\"; bash /opt/crave/github-actions/upload.sh '${{ github.run_id }}' 'gtel3g' '${{ github.repository }}' 'lineage_gtel3g-${{ github.run_id }}' '' || true; fi" || true
 
