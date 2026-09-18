@@ -1,5 +1,7 @@
 # gtel3g-builder — LineageOS 16.0 builder for Samsung Galaxy Tab E 9.6 (SM-T561)
 
+[![Build gtel3g](https://github.com/BytinIsDead/gtel3g-builder/actions/workflows/build.yml/badge.svg)](https://github.com/BytinIsDead/gtel3g-builder/actions/workflows/build.yml)
+
 Builder repo that ties together **BytinIsDead's** device + kernel trees to produce a flashable LineageOS 16.0 build for `gtel3g` / `gtelwifi` (SC7730SE / sc8830).
 
 ## What this pulls
@@ -62,8 +64,19 @@ cd gtel3g-builder
 
 On-device debug logger: `device/samsung/gtel3g/tools/debug/collect_t561_full_logs.sh`
 
+## GitHub Actions
+
+Workflow `.github/workflows/build.yml` builds `lineage_gtel3g-userdebug` on `ubuntu-22.04` with Java 8 + ccache:
+
+- Triggers on push to `main` (manifest/workflow changes) and manually via **Actions → Build gtel3g → Run workflow**
+- `Free disk space` + install deps + `repo init/sync` (uses `manifests/gtel3g.xml` from this repo) + `mka bacon`
+- Uploads `lineage-*.zip`, `recovery.img`, `build.log` as artifact (14 days) and creates a Release on manual dispatch
+
+Run manually: `gh workflow run build.yml -f variant=userdebug -f upload=true`
+
 ## Links
 
 - Device: https://github.com/BytinIsDead/android_device_samsung_gtel3g (branch `lineage-16.0`)
 - Kernel: https://github.com/BytinIsDead/android_kernel_samsung_gtel3g (branch `main`)
 - Upstream org: https://github.com/gtel3g/local_manifests
+- Builder: https://github.com/BytinIsDead/gtel3g-builder
