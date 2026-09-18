@@ -1,0 +1,9 @@
+# Crave manifest for gtel3g Lineage16 (aosp-silver queue optional)
+# Used only if CUSTOM_YAML secret is not set
+# For Lineage16 on foss.crave.io: projectID 81, folder /crave-devspaces/Lineage16
+# If you use PAID builds, add --platform aosp-silver via CRAVE_FLAGS or set PAID secret
+Lineage16:
+  ignoreClientHostname: true
+  env:
+    BUILD_USERNAME: ${{ github.actor }}
+    BUILD_HOSTNAME: crave

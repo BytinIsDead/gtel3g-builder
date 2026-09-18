@@ -1,0 +1,230 @@
+name: Crave gtel3g (Lineage 16.0)
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "Build variant"
+        required: true
+        default: "userdebug"
+        type: choice
+        options: [user, userdebug, eng]
+      clean:
+        description: "Clean build (--clean)"
+        required: true
+        default: "no"
+        type: choice
+        options: [yes, no]
+      paid:
+        description: "Use paid queue (aosp-silver) — requires wallet"
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches: [main]
+    paths:
+      - "manifests/**"
+      - ".github/workflows/crave.yml"
+      - "configs/crave/**"
+
+concurrency:
+  group: crave-gtel3g-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  crave-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1440
+    env:
+      PROJECTID: "81"
+      PROJECTFOLDER: "/crave-devspaces/Lineage16"
+      REPO_INIT: "repo init -u https://github.com/accupara/los16.git -b lineage-16.0 --git-lfs --depth=1"
+
+    steps:
+      - name: Checkout builder
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Check Crave credentials
+        run: |
+          if [[ -z "${{ secrets.CRAVE_USERNAME }}" || -z "${{ secrets.CRAVE_TOKEN }}" ]]; then
+            echo "::error::Set CRAVE_USERNAME and CRAVE_TOKEN in repo Secrets (from foss.crave.io -> API Keys -> crave.conf)"
+            exit 1
+          fi
+          echo "Crave creds present"
+
+      - name: Install crave
+        run: |
+          mkdir -p ~/.bin
+          curl -s https://raw.githubusercontent.com/accupara/crave/master/get_crave.sh | bash -s --
+          mv ./crave ~/.bin/crave
+          chmod +x ~/.bin/crave
+          sudo ln -sf $HOME/.bin/crave /usr/bin/crave
+          crave --version || true
+          # create crave.conf from sample
+          if [ -f crave.conf.sample ]; then
+            envsubst < crave.conf.sample > ~/.crave.conf 2>/dev/null || envsubst < crave.conf.sample > crave.conf
+            # ensure crave finds it
+            mkdir -p ~/.config 2>/dev/null || true
+            cp -v crave.conf ~/.crave.conf 2>/dev/null || cp -v ~/.crave.conf crave.conf 2>/dev/null || true
+            cat ~/.crave.conf | sed 's/token = .*/token = ***/' || true
+          fi
+        env:
+          CRAVE_USERNAME: ${{ secrets.CRAVE_USERNAME }}
+          CRAVE_TOKEN: ${{ secrets.CRAVE_TOKEN }}
+
+      - name: Configure crave.yaml
+        run: |
+          mkdir -p .repo/manifests 2>/dev/null || true
+          # Prefer custom yaml from secret, else template
+          if [[ -n "${{ secrets.CUSTOM_YAML }}" ]]; then
+            echo "${{ secrets.CUSTOM_YAML }}" > /tmp/crave.yaml
+            echo "Using CUSTOM_YAML secret"
+            cat /tmp/crave.yaml
+          else
+            cp configs/crave/crave.yaml.aosp /tmp/crave.yaml
+            echo "Using configs/crave/crave.yaml.aosp"
+            cat /tmp/crave.yaml
+          fi
+          # Place where crave expects it (project's .repo/manifests)
+          # crave will copy it during clone create; also keep a copy for direct devspace usage
+          mkdir -p $PROJECTFOLDER/.repo/manifests 2>/dev/null || true
+          cp /tmp/crave.yaml $PROJECTFOLDER/.repo/manifests/crave.yaml 2>/dev/null || true
+
+      - name: Create / ensure Crave clone
+        run: |
+          set -e
+          # If running inside devspace, skip clone creation
+          if [[ "$DCDEVSPACE" == *1* ]]; then
+            echo "Already inside crave devspace — skipping clone create"
+          else
+            if crave clone list --json | jq -e --arg f "$PROJECTFOLDER" '.clones[] | select(.["Cloned At"] == $f)' >/dev/null 2>&1; then
+              echo "Clone $PROJECTFOLDER already exists"
+            else
+              echo "Creating clone $PROJECTFOLDER projectID $PROJECTID"
+              crave clone create --projectID "$PROJECTID" "$PROJECTFOLDER" || { echo "::warning::clone create failed — may already exist or need manual creation"; crave clone list || true; }
+            fi
+            crave clone list || true
+          fi
+
+      - name: Build via crave run (gtel3g)
+        run: |
+          set -e
+          # Extra init for non-Lineage ROMs if needed (not for gtel3g)
+          BUILD_DIFFERENT_ROM="echo 'Using base Lineage16 project'"
+          LOCAL_MANIFEST="mkdir -p .repo/local_manifests && rm -rf .repo/local_manifests/* || true && curl -L https://raw.githubusercontent.com/BytinIsDead/gtel3g-builder/main/manifests/gtel3g.xml -o .repo/local_manifests/gtel3g.xml && cat .repo/local_manifests/gtel3g.xml"
+          LUNCH="lunch lineage_gtel3g-${{ inputs.variant || 'userdebug' }}"
+          BUILD_CMD="mka bacon -j\$(nproc --all)"
+
+          # Paid / clean flags
+          CLEAN=""
+          if [[ "${{ inputs.clean }}" == "yes" ]]; then CLEAN="--clean"; fi
+          PAID=""
+          if [[ "${{ inputs.paid }}" == "true" || -n "${{ secrets.PAID }}" ]]; then
+            echo "Paid queue enabled (aosp-silver)"
+            PAID="--platform aosp-silver"
+          fi
+
+          echo "=== Queuing crave run ==="
+          echo "PROJECTID=$PROJECTID $PROJECTFOLDER"
+          echo "REPO_INIT=$REPO_INIT"
+          echo "LOCAL_MANIFEST=$LOCAL_MANIFEST"
+          echo "LUNCH=$LUNCH"
+          echo "BUILD_CMD=$BUILD_CMD"
+
+          crave ${{ secrets.CRAVE_FLAGS }} run --no-patch $CLEAN $PAID -- "
+            set -e
+            # Ensure local manifests override
+            rm -rf .repo/local_manifests/*.xml || true
+            $LOCAL_MANIFEST
+
+            # Resync (crave ships /opt/crave/resync.sh or /usr/bin/resync)
+            if [ -f /opt/crave/resync.sh ]; then
+              /opt/crave/resync.sh
+            elif [ -f /usr/bin/resync ]; then
+              /usr/bin/resync
+            else
+              repo sync -c -j\$(nproc --all) --force-sync --no-clone-bundle --no-tags --optimized-fetch
+            fi
+
+            export BUILD_USERNAME=${{ github.actor }}
+            export BUILD_HOSTNAME=crave
+            source build/envsetup.sh
+            $LUNCH
+            make installclean || true
+            $BUILD_CMD
+          "
+          echo "=== crave run finished ==="
+
+      - name: Pull artifacts from crave
+        if: always()
+        run: |
+          set +e
+          echo "Pulling out/error.log if any"
+          crave pull out/error.log 2>&1 | head -n 200 || true
+          if [ -f out/error.log ]; then echo "=== out/error.log ==="; cat out/error.log | head -n 500; fi
+
+          # Upload via crave ssh (crave's upload helper)
+          # First push GitHub token for upload script
+          echo "${{ secrets.GITHUB_TOKEN }}" > /tmp/token.txt
+          # Use crave ssh to run upload.sh if present
+          crave ssh -- "ls -lh out/target/product/gtel3g/ || true; du -sh out/target/product/gtel3g/* 2>/dev/null | head -n 20 || true" || true
+
+          # Try crave push + upload.sh path (exists on newer crave images)
+          crave push /tmp/token.txt -d $(crave ssh -- pwd 2>/dev/null | grep -v Select | tr -d '\r' | head -n1)/ 2>&1 || echo "crave push not available, skipping"
+
+          # Fallback: direct pull of zip via crave pull (slower but works for small zips)
+          # We pull via crave ssh + scp-like? Use crave pull for each artifact
+          mkdir -p pulled
+          for f in out/target/product/gtel3g/*.zip out/target/product/gtel3g/*.zip.md5sum out/target/product/gtel3g/recovery.img; do
+            crave pull "$f" 2>&1 | head -n 20 || true
+            # crave pull places file at ./<filename> ? Check
+            if [ -f "$(basename $f)" ]; then mv "$(basename $f)" pulled/ 2>/dev/null || true; fi
+            if [ -f "$f" ]; then cp "$f" pulled/ 2>/dev/null || true; fi
+          done
+          ls -lh pulled/ || true
+          ls -lh out/target/product/gtel3g/ 2>/dev/null || true
+          # Try official upload script if present on devspace
+          crave ssh -- "if [ -f /opt/crave/github-actions/upload.sh ]; then export GH_UPLOAD_LIMIT=\"${{ secrets.GH_UPLOAD_LIMIT }}\"; bash /opt/crave/github-actions/upload.sh '${{ github.run_id }}' 'gtel3g' '${{ github.repository }}' 'lineage_gtel3g-${{ github.run_id }}' '' || true; fi" || true
+
+      - name: Upload artifacts to GitHub (fallback)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gtel3g-crave-${{ github.run_number }}
+          path: |
+            pulled/*
+            out/error.log
+            out/target/product/gtel3g/*.zip
+            out/target/product/gtel3g/*.zip.md5sum
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Release
+        if: always() && github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: crave-${{ github.run_number }}
+          name: gtel3g crave build ${{ github.run_number }}
+          body: |
+            Crave build `${{ github.run_number }}` — Lineage 16.0 `gtel3g`
+
+            - Device: `BytinIsDead/android_device_samsung_gtel3g@lineage-16.0`
+            - Kernel: `BytinIsDead/android_kernel_samsung_gtel3g@main`
+            - Base: `Lineage16` (accupara/los16, projectID 81)
+            - Manifest: `manifests/gtel3g.xml`
+            - Variant: `${{ inputs.variant }}` clean: `${{ inputs.clean }}`
+          files: |
+            pulled/*.zip
+            pulled/*.zip.md5sum
+            out/target/product/gtel3g/*.zip
+          fail_on_unmatched_files: false
+
+      - name: Destroy clone (optional)
+        if: always()
+        run: |
+          # Keep clone for ccache reuse; only destroy if you want clean next time
+          echo "Clone kept at $PROJECTFOLDER for next build (reuse ccache). Destroy manually with: crave clone destroy -y $PROJECTFOLDER"
+          # Uncomment to auto-destroy:
+          # crave clone destroy -y "$PROJECTFOLDER" || true
