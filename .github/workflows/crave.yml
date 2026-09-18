@@ -14,7 +14,7 @@ on:
         required: true
         default: "no"
         type: choice
-        options: [yes, no]
+        options: ["yes", "no"]
       paid:
         description: "Use paid queue (aosp-silver) — requires wallet"
         required: false
